@@ -241,6 +241,7 @@ template <int TS, int TM> __global__ void gputiled3(r_Ptr<float> C, cr_Ptr<float
 
 template <int TS, int TM> __global__ void gputiled4(r_Ptr<float> C, cr_Ptr<float> A, cr_Ptr<float> B,int Ay,int Ax,int Bx)
 {
+	//further work including double buffering(by mem.async instr in ptx), removing register conflict in SASS, warptiling, manipulate the warp scheduling and others.
 	static_assert(TM%4==0&&TM>0,"A bad TM");
 	static_assert(TS%TM==0&&TS>TM,"A bad TS");
 	// A block still deals with TS*TS elements.
@@ -270,6 +271,7 @@ template <int TS, int TM> __global__ void gputiled4(r_Ptr<float> C, cr_Ptr<float
 		// load TS*TS matrix to smem.
 		for(int m=0;m<TM;m++){
 		    for(int n=0;n<TM;n++){
+		    	//There is back conflict here but it is worth for removing bank conflicts later.
 		    	Atile[tx*TM+n][ty*TM+m] = A[(ay+m)*Ax+ax+n];  // copy A tile to shared mem with transpose
 		    }
 		}

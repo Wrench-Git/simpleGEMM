@@ -8,3 +8,7 @@
 *.lib
 *.exp
 *.exe
+*.un~
+*.cu~
+Makefile~
+*.ncu-rep

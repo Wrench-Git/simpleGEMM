@@ -246,7 +246,7 @@ template <int TS, int TM> __global__ void gputiled4(r_Ptr<float> C, cr_Ptr<float
 	// A block still deals with TS*TS elements.
 	__shared__ float Atile[TS][TS];  // tile in A eg [32][32]
 	__shared__ float Btile[TS][TS];  // tile in B eg [32][32]
-       
+
 	// A warp deals with 32*TM*TM elements.
 	// A thread deals with TM*TM elements.
 	float threadResults[TM][TM] = {0.0};
@@ -315,6 +315,86 @@ template <int TS, int TM> __global__ void gputiled4(r_Ptr<float> C, cr_Ptr<float
 }
 
 template <int TS, int TM> __global__ void gputiled5(r_Ptr<float> C, cr_Ptr<float> A, cr_Ptr<float> B,int Ay,int Ax,int Bx)
+{
+	// Add solution(swizzle) to resolve bank conflict 
+	static_assert(TM%4==0&&TM>0,"A bad TM");
+	static_assert(TS%TM==0&&TS>TM,"A bad TS");
+	// A block still deals with TS*TS elements.
+	__shared__ float Atile[TS][TS];  // tile in A eg [32][32]
+	__shared__ float Btile[TS][TS];  // tile in B eg [32][32]
+
+	// A warp deals with 32*TM*TM elements.
+	// A thread deals with TM*TM elements.
+	float threadResults[TM][TM] = {0.0};
+	float regA[TM] = {0.0};
+	float regB[TM] = {0.0};
+
+	int tx  = threadIdx.x;            // tile col index j
+	int ty  = threadIdx.y;            // tile row index i
+	int ocx = blockDim.x * blockIdx.x * TM;  // tile x origin in C (all threads), tiling along row
+	int ocy = blockDim.y * blockIdx.y * TM;  // tile y origin in C (all threads), tiling along column
+	
+	int swizzleIndex=tx%4;
+	// denote that this thread deal with a TM*TM matrix starts from [tx*TM, ty*TM]
+	// in an TS*TS (for C) matrix starts from [ocx,ocy].
+	int ax = tx*TM;      // j or x in first tile on A
+	int by = ty*TM;   // i or y in first tile on B
+	int ay = ocy+by;  // i or y in first tile on A and C
+	int bx = ocx+ax;  // j or x in first tile on B and C
+
+#pragma unroll 16
+	for(int t=0; t<gridDim.x; t++){
+		// load TS*TS matrix to smem.
+		for(int m=0;m<TM;m++){
+			for(int n=0;n<TM/4;n++){
+				//There is back conflict here but it is worth for removing bank conflicts later.
+				// copy A tile to shared mem with transpose
+				float4 tmp;
+				LOAD_FLOAT4(tmp,A[(ay+m)*Ax+ax+4*n]);
+				Atile[tx*TM+4*n  ][ty*TM+m^swizzleIndex] = tmp.x;  
+				Atile[tx*TM+4*n+1][ty*TM+m^swizzleIndex] = tmp.y; 
+				Atile[tx*TM+4*n+2][ty*TM+m^swizzleIndex] = tmp.z; 
+				Atile[tx*TM+4*n+3][ty*TM+m^swizzleIndex] = tmp.w; 
+				LOAD_FLOAT4(Btile[ty*TM+m][tx*TM+n*4],B[(by+m)*Bx+bx+n*4]);// copy B tile to shared mem
+			}
+		}
+		__syncthreads();
+		
+		// the outer(k) loop is like the loop of t.
+		// The pragma unroll here is extremly important!
+		#pragma unroll 4
+		for(int k=0;k<TS/TM;k++) {
+			int current_swizzle_index = k%4;
+			// here we deal with a sub-matrix for subA with index starts from [ty*TM,k*TM]
+			// and a sub-matrix for subB with index starts from [k*TM,tx*TM]
+			// here we split the TM*TM^TM*TM matmul by spliting into vectors mult.
+			for(int m=0;m<TM;m++){
+				for(int n=0;n<TM/4;n++){
+					LOAD_FLOAT4(regA[4*n],Atile[k*TM+m][ty*TM+n*4]);
+					LOAD_FLOAT4(regB[4*n],Btile[k*TM+m][tx*TM+n*4]);
+				}
+				// deal with TM elements in one column.
+				for(int i=0;i<TM;i++){
+					for(int j=0;j<TM;j++){
+						threadResults[i][j] += regA[i^current_swizzle_index] * regB[j];
+					}
+				}
+			}
+		}
+		__syncthreads();
+		ax += TS;         // step A tiles along rows of A
+		by += TS;         // step B tiles down  cols of B
+	}
+
+#pragma unroll 16
+	for(int m=0;m<TM;m++){
+		for(int n=0;n<TM/4;n++){
+			LOAD_FLOAT4(C[(ay+m)*Bx+bx+4*n],threadResults[m][4*n]);// store complete result
+		}
+	}
+}
+
+template <int TS, int TM> __global__ void gputiled6(r_Ptr<float> C, cr_Ptr<float> A, cr_Ptr<float> B,int Ay,int Ax,int Bx)
 {
 	// Warning: this kind of double buffer here does not make perf improvement.
 	// further work including double buffering(by mem.async instr in ptx), removing register conflict in SASS, warptiling, manipulate the warp scheduling and others.
